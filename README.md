@@ -55,7 +55,7 @@ def generate_text_simple(model, idx, max_new_tokens, context_size):
         idx_next = random.choices(logits)[0] 
         #将下一个预测添加到序列中
         idx.append(idx_next) 
-        
+
     return idx
 ```
 
@@ -81,3 +81,14 @@ generate_text_simple(model=model, idx=in_idx, max_new_tokens=5, context_size=4)
 - 实现模型预测，既完成模型训练
 - 选择最有可能或最优的预测，而不是随机输出
 - 使用正常的文本来测试，且将结果输出为人类能看懂的文本
+
+
+
+## License
+
+本项目采用 MIT 许可证。根据此许可证，您可以在遵循 MIT 许可证条款的前提下自由使用、修改和分发本仓库中的内容。然而，如果您打算将本项目的任何部分用于商业用途，请务必遵守以下额外条件：
+
+- **标明原作者**：请在您的作品或产品中明确标注原作者，并附上原作者的名字。
+- **提供链接**：请提供一个指向本 GitHub 仓库的链接，以便用户能够找到原始项目。
+
+有关 MIT 许可证的更多信息，请参阅 [MIT 许可证](LICENSE) 文件。
