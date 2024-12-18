@@ -626,6 +626,472 @@ print("\n输出:\n", targets)
 好了，到此数据准备完成，下一步我们进入模型训练
 
 ## 2. 模型架构与实现
+本节我们将实现一个具体的模型，首先需要了解类GPT模型架构，这样有利于理解和生成文本，这部分是所有内容当中最抽象最难理解的部分，但要实现大模型，这部分又是绕不开的一个内容，我尽可能以易懂的文字来解释。
+
+ <img src="https://sebastianraschka.com/images/LLMs-from-scratch-images/ch04_compressed/02.webp" height="350px">
+
+ <img src="https://sebastianraschka.com/images/LLMs-from-scratch-images/ch04_compressed/13.webp?1" height="350px">
+
+ <img src="https://sebastianraschka.com/images/LLMs-from-scratch-images/ch04_compressed/15.webp" height="350px">
+
+上图展示GPT模型架构，它是基于原始Transformer架构的解码器部分，实现按顺序生成单词。将原始文本经 `token` 化，输入到GPT模型中，经嵌入层、Transformer块、输出层，最后预测出下一个单词
+- `Tokenized Text`: 它是上一节中将文本 `token` 化为数值表示 `toekn ID`
+- `Embedding layers`: 嵌入层，其本质是对参数矩阵的查找操作，通常会在模型训练期间进行更新，主要包括`Token embedding layer`、`Positional embedding layer`；
+    - `Token embedding layer`: 标记嵌入层，
+    - `Positional embedding layer`:  位置嵌入层
+- `Transformer block`: 包括 `层归一化` (`LayerNorm`) 、`多头注意力机制`(`Masked multi-head attention`)、`Dropout` (`Dropout`)、`跳跃连接`(`Shortcut connection`)、`前馈网络`(`Feed forward`)、`Dropout` (`Dropout`)
+    - `层归一化` (`LayerNorm`)：将神经网络层的激活集中在平均值 0 附近，并将其方差归一化为 1，稳定训练并更快地收敛到有效权重
+    - `多头注意力机制`(`Masked multi-head attention`)：使用注意力机制可捕获数据依赖关系，而自注意力机制关注输入的不同部分
+    - `前馈网络`(`Feed forward`)：通过一系列线性变换和非线性激活函数对输入数据进行处理，以捕捉输入数据中的特征
+    - `跳跃连接`(`Shortcut connection`)：为梯度在网络中流动创建了一条替代的较短路径,通过将一层的输出添加到后一层的输出来实现的，通常会跳过中间的一个或多个层，以缓解梯度消失问题
+    - `Dropout` (`Dropout`)
+- `Output layers`: 输出层是一个线性层
+
+通过架构，我们自定义需要实现的各部分，主要包括 `GPTModel`,`LayerNorm`,`MultiHeadAttention`,`FeedForward`,`TransformerBlock`等，我们将之前定义的 `GPTModel` 类拿过来，并定义`LayerNorm`、`MultiHeadAttention`、`FeedForward`、`TransformerBlock`，接下来主要介绍各部分实现。
+
+```python
+import torch
+import torch.nn as nn
+print("torch version:",torch.__version__)
+
+class GPTModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+    
+class LayerNorm(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+class FeedForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+class TransformerBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+```
+
+在实现各部分前，我们先定义一组通用的参数：
+
+
+```python
+GPT_CONFIG_85M = {
+    "vocab_size": 323,      # 词汇表大小
+    "context_length": 8,    # 上下文长度
+    "emb_dim": 768,          # 嵌入维度
+    "n_heads": 12,          # 注意力头数量
+    "n_layers": 12,         # 层数
+    "drop_rate": 0.1,       # Dropout 率
+    "qkv_bias": False       # Query-Key-Value bias
+}
+```
+
+- 我们使用短变量名以避免以后出现长代码行
+- `"vocab_size"` 表示词汇量为 323 个字
+- `"context_length"` 表示模型的最大输入标记数
+- `"emb_dim"` 是标记输入的嵌入大小，将每个输入标记转换为 768 维向量
+- `"n_heads"` 多头注意机制中的注意头数量
+- `"n_layers"` 是模型中的 `transformer` 块数量
+- `"drop_rate"` dropout 机制的强度； 0.1 表示在训练期间丢弃 10% 的隐藏单元以减轻过度拟合
+- `"qkv_bias"` 决定多头注意力机制中的 `Linear` 层在计算查询（Q）、键（K）和值（V）张量时是否应包含偏差向量；
+
+### 2.1 实现嵌入层 
+
+- 标记嵌入（`Token embedding layer` ）可以理解为通过输入序列的索引位置在整个词汇表中找到所有输出特征的参数矩阵的初始值，代码如下：
+
+```pyhton
+vocab_size = len(vocab)
+output_dim = 16 # 假定16个特征维度
+
+torch.manual_seed(123)
+token_embedding_layer = torch.nn.Embedding(vocab_size, output_dim) # 初始化一个嵌入层
+
+token_embeddings = token_embedding_layer(inputs) # 输入 token 的初始嵌入矩阵
+print(token_embeddings.shape) # inputs是一个8x4矩阵（8批次4长度），则输出维度为[8, 4, 16]
+```
+输出
+
+```
+torch.Size([8, 4, 16])
+```
+
+
+- 位置嵌入（`Positional embedding layer`）可以理解为输入序列所有token之间的依赖关系在所有特征矩阵的初始值，代码如下：
+
+```python
+context_length = context_size # 输入上下文长度
+pos_embedding_layer = torch.nn.Embedding(context_length, output_dim) # 初始化一个嵌入层
+
+pos_embeddings = pos_embedding_layer(torch.arange(context_size)) # 输入序列位置嵌入的初始矩阵
+print(pos_embeddings.shape) # 4x16
+```
+输出
+```
+torch.Size([4, 16])
+```
+
+
+然后将这两个相加可得嵌入层
+
+```python
+input_embeddings = token_embeddings + pos_embeddings
+print(input_embeddings.shape)
+```
+输出
+```
+torch.Size([8, 4, 16])
+```
+
+
+### 2.2 实现层归一化
+
+- 层归一化是将神经网络层的激活集中在平均值 0 附近，并将其方差归一化为 1，这可以稳定训练并更快地收敛到有效权重，
+- 应用于 Transformer 块中的多头注意模块之前和之后，也应用于最终输出层之前;
+- 一般通过减去平均值，并除以方差来执行标准化
+
+```python
+class LayerNorm(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.eps = 1e-5
+        self.scale = nn.Parameter(torch.ones(emb_dim))
+        self.shift = nn.Parameter(torch.zeros(emb_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=-1, keepdim=True) # dim=-1意味着最后一个维度上计算平均值；keepdim=True，输出广播回原来的形状
+        var = x.var(dim=-1, keepdim=True, unbiased=False) # unbiased=False表示方差计算时除以样本大小（n），不包含矫正（n-1)，样本较大，忽略n和n-1的差异
+        norm_x = (x - mean) / torch.sqrt(var + self.eps)
+        return self.scale * norm_x + self.shift
+```
+
+ - 实际实现时增加了一个较小的数 `eps` 避免方差为0时除以0的错误
+ - 标准化时增加了两个参数 `scale` 和 `shift`，初始值分别为1和0，它们是可训练参数，在训练期间自动调整
+
+
+### 2.3 前馈网络
+
+前馈神经网络通过一系列线性变换和非线性激活函数对输入数据进行处理，以捕捉输入数据中的特征，并可能转换其表示形式。在此我们使用GELU非线性激活函数。通常实现一种计算上更便宜的近似值：$\text{GELU}(x) \approx 0.5 \cdot x \cdot \left(1 + \tanh\left[\sqrt{\frac{2}{\pi}} \cdot \left(x + 0.044715 \cdot x^3\right)\right]\right)
+$
+
+```python
+class GELU(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return 0.5 * x * (1 + torch.tanh(torch.sqrt(torch.tensor(2.0 / torch.pi)) *(x + 0.044715 * torch.pow(x, 3))))
+```
+
+接下来，实现小型神经网络模块 `FeedForward`，使用线性层-激活函数-线性层的机构，代码如下：
+
+```python
+class FeedForward(nn.Module):
+    def __init__(self, emb_dim):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(emb_dim, 4 * emb_dim),
+            GELU(),
+            nn.Linear(4 * emb_dim, emb_dim)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+```
+
+### 2.4 跳跃连接
+跳跃连接也称为跳过或残差连接，用以缓解梯度消失问题，跳跃连接为梯度在网络中流动创建了一条替代的较短路径,这是通过将一层的输出添加到后一层的输出来实现的，通常会跳过中间的一个或多个层，可以看如下图：
+
+<img src="https://sebastianraschka.com/images/LLMs-from-scratch-images/ch04_compressed/12.webp?123" width="400px">
+
+### 2.5 多头注意力机制
+这种自注意力机制也称为“缩放点积注意力”，总体思路是将上下文向量计算为特定于某个输入元素的输入向量的加权和，初始有三个权重矩阵，模型训练期间更新权重矩阵
+
+#### 单头因果自注意力机制
+因果自注意力确保模型对序列中某个位置的预测仅依赖于先前位置的已知输出，而不依赖于未来位置，确保每个下一个单词的预测仅依赖于前面的单词
+
+- 首先引入三个训练权重矩阵 $W_q$、$W_k$ 和 $W_v$
+- **步骤 1** 这三个矩阵用于通过矩阵乘法将嵌入的输入标记 $x^{(i)}$ 投影到查询、键和值向量中：
+
+  - 查询向量：$q^{(i)} = W_q \,x^{(i)}$
+  - 键向量：$k^{(i)} = W_k \,x^{(i)}$
+  - 值向量：$v^{(i)} = W_v \,x^{(i)}$
+
+- **步骤 2**，计算查询和每个关键向量之间的点积来计算非标准化注意力分数：
+  - 权重分数：$scores^{(i)} = q^{(i)} @ \,k$
+  - 因果机制：对于每个给定的标记，屏蔽掉未来的标记，即输入文本中当前标记之后的标记
+
+- **步骤 3**，使用 softmax 函数计算注意力权重（总和为 1 的标准化注意力分数）,通过将注意力分数除以嵌入维度的平方根 $\sqrt{d_k}$（即 `d_k**0.5`）来缩放注意力分数：
+  - 权重矩阵：$weights^{(i)} = softmax(scores^{(i)} / \sqrt{d_k})$
+  - 掩盖权重：使用 dropout 掩盖额外的注意力权重
+
+- **步骤 4**，计算输入查询向量的上下文向量：
+  - 上下文向量：$context^{(i)} = weights^{(i)} @ \,v$
+
+```python
+class CausalSelfAttention(nn.Module):
+
+    def __init__(self, d_in, d_out, context_length,
+                 dropout, qkv_bias=False):
+        super().__init__()
+        self.d_out = d_out
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.dropout = nn.Dropout(dropout) # New
+        self.register_buffer('mask', torch.triu(torch.ones(context_length, context_length), diagonal=1)) # New
+
+    def forward(self, x):
+        b, num_tokens, d_in = x.shape # New batch dimension b
+        keys = self.W_key(x)
+        queries = self.W_query(x)
+        values = self.W_value(x)
+
+        attn_scores = queries @ keys.transpose(1, 2) # Changed transpose
+        attn_scores.masked_fill_(  # New, _ ops are in-place
+            self.mask.bool()[:num_tokens, :num_tokens], -torch.inf)  # `:num_tokens` to account for cases where the number of tokens in the batch is smaller than the supported context_size
+        attn_weights = torch.softmax(
+            attn_scores / keys.shape[-1]**0.5, dim=-1
+        )
+        attn_weights = self.dropout(attn_weights) # New
+
+        context_vec = attn_weights @ values
+        return context_vec
+```
+
+#### 扩展到多头注意力
+多头注意力背后的主要思想是使用不同的、学习到的线性投影多次（并行）运行注意力机制。这允许模型共同关注来自不同位置的不同表示子空间的信息。只需堆叠多个单头注意力模块即可获得多头注意力模块：
+
+```python
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
+        super().__init__()
+        self.heads = nn.ModuleList(
+            [CausalSelfAttention(d_in, d_out, context_length, dropout, qkv_bias) 
+             for _ in range(num_heads)]
+        )
+        self.out_proj = nn.Linear(d_out*num_heads, d_out*num_heads)
+
+    def forward(self, x):
+        context_vec = torch.cat([head(x) for head in self.heads], dim=-1)
+        return self.out_proj(context_vec)
+```
+
+虽然以上是多头注意力的直观且功能齐全的实现（包装了之前的单头注意力`CausalSelfAttention`实现），但我们可以编写一个名为`MultiHeadAttention`的独立类来实现相同的功能，创建单个W_query、W_key和W_value权重矩阵，然后将它们拆分为每个注意力头的单独矩阵：
+
+```python
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
+        super().__init__()
+        assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
+
+        self.d_out = d_out
+        self.num_heads = num_heads
+        self.head_dim = d_out // num_heads  # Reduce the projection dim to match desired output dim
+
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.out_proj = nn.Linear(d_out, d_out)  # Linear layer to combine head outputs
+        self.dropout = nn.Dropout(dropout)
+        self.register_buffer('mask', torch.triu(torch.ones(context_length, context_length), diagonal=1))
+
+    def forward(self, x):
+        b, num_tokens, d_in = x.shape
+
+        keys = self.W_key(x)  # Shape: (b, num_tokens, d_out)
+        queries = self.W_query(x)
+        values = self.W_value(x)
+
+        # We implicitly split the matrix by adding a `num_heads` dimension
+        # Unroll last dim: (b, num_tokens, d_out) -> (b, num_tokens, num_heads, head_dim)
+        keys = keys.view(b, num_tokens, self.num_heads, self.head_dim)
+        values = values.view(b, num_tokens, self.num_heads, self.head_dim)
+        queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
+
+        # Transpose: (b, num_tokens, num_heads, head_dim) -> (b, num_heads, num_tokens, head_dim)
+        keys = keys.transpose(1, 2)
+        queries = queries.transpose(1, 2)
+        values = values.transpose(1, 2)
+
+        # Compute scaled dot-product attention (aka self-attention) with a causal mask
+        attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
+
+        # Original mask truncated to the number of tokens and converted to boolean
+        mask_bool = self.mask.bool()[:num_tokens, :num_tokens]
+
+        # Use the mask to fill attention scores
+        attn_scores.masked_fill_(mask_bool, -torch.inf)
+
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Shape: (b, num_tokens, num_heads, head_dim)
+        context_vec = (attn_weights @ values).transpose(1, 2)
+
+        # Combine heads, where self.d_out = self.num_heads * self.head_dim
+        context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
+        context_vec = self.out_proj(context_vec)  # optional projection
+
+        return context_vec
+```
+
+### 2.6 实现 `Transformer`
+现在将前面的概念组合成所谓的 `transformer` 块，transformer 块还使用了 dropout 和快捷连接
+
+```python
+class TransformerBlock(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.norm1 = LayerNorm(cfg["emb_dim"])
+        self.att = MultiHeadAttention(
+            d_in=cfg["emb_dim"],
+            # d_out=cfg["emb_dim"]//cfg["n_heads"], #如果使用堆叠多个头的方式，请将d_out赋值
+            d_out=cfg["emb_dim"],
+            context_length=cfg["context_length"],
+            num_heads=cfg["n_heads"], 
+            dropout=cfg["drop_rate"],
+            qkv_bias=cfg["qkv_bias"])
+        self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
+        self.norm2 = LayerNorm(cfg["emb_dim"])
+        self.ff = FeedForward(cfg["emb_dim"])
+
+    def forward(self, x):
+        # 注意力模块的残差连接
+        shortcut = x
+        x = self.norm1(x)
+        x = self.att(x)  # [batch_size, num_tokens, emb_size]
+        x = self.drop_shortcut(x)
+        x = x + shortcut  # 将原始输入添加回去
+
+        # 前馈模块的残差连接
+        shortcut = x
+        x = self.norm2(x)
+        x = self.ff(x)
+        x = self.drop_shortcut(x)
+        x = x + shortcut  # 将原始输入添加回去
+
+        return x
+```
+
+### 2.7 实现GPT模型
+最后将嵌入层、`transformer` 块、输出层组合以实现 `GPTModel`, 其中 `transformer` 块重复12次：
+
+```python
+class GPTModel(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
+        self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
+        self.drop_emb = nn.Dropout(cfg["drop_rate"])
+        
+        self.trf_blocks = nn.Sequential(
+            *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
+        
+        self.final_norm = LayerNorm(cfg["emb_dim"])
+        self.out_head = nn.Linear(
+            cfg["emb_dim"], cfg["vocab_size"], bias=False
+        )
+
+    def forward(self, in_idx):
+        batch_size, seq_len = in_idx.shape
+        tok_embeds = self.tok_emb(in_idx)
+        pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))
+        x = tok_embeds + pos_embeds  # Shape [batch_size, num_tokens, emb_size]
+        x = self.drop_emb(x)
+        x = self.trf_blocks(x)
+        x = self.final_norm(x)
+        logits = self.out_head(x)
+        return logits
+```
+
+- 使用模型的参数配置，可以随机初始权重实例化此 GPT 模型，如下所示：
+
+```python
+torch.manual_seed(123)
+model = GPTModel(GPT_CONFIG_85M)
+out = model(inputs)
+print("输入形状:", inputs.shape)
+print("输出形状:", out.shape)
+print("\n")
+print("输入:\n", inputs)
+print("输出:\n", out)
+```
+```
+输入形状: torch.Size([8, 4])
+输出形状: torch.Size([8, 4, 323])
+
+
+输入:
+ tensor([[199,   6, 210, 204],
+        [201, 298, 176, 184],
+        [188, 256, 185, 223],
+        [ 41,  45,   1,   1],
+        [ 87, 219,  80, 223],
+        [170, 293,   7, 319],
+        [145,  32, 199,  12],
+        [ 25, 298, 176, 255]])
+输出:
+ tensor([[[ 0.3726,  0.0385,  0.0827,  ...,  0.4805,  0.9088, -0.6839],
+         [ 0.7950, -1.0513, -0.6098,  ..., -0.8869, -0.6006, -0.5492],
+         [ 0.9083, -0.9017, -0.3999,  ..., -0.3270, -0.2590,  0.2711],
+         [-1.0728, -0.3401,  0.8292,  ...,  0.4014, -1.2309,  0.2709]],
+
+        [[ 0.0749, -0.2326,  0.4346,  ...,  0.6214,  0.9596, -0.0181],
+         [-0.2092, -1.7445, -0.1894,  ..., -1.0994,  0.3208,  0.0739],
+         [ 0.0742, -1.2146, -0.7375,  ..., -0.7046, -0.2390,  0.9102],
+         [-0.4513, -0.9334,  0.5463,  ..., -0.3801, -1.3193,  0.1084]],
+
+        [[ 0.2166, -0.3299, -0.2181,  ...,  0.3662,  0.3434, -0.7779],
+...
+         [-0.3524, -1.3779, -0.1233,  ..., -1.4572, -0.0858, -0.5349],
+         [-0.2064, -1.5769, -0.7577,  ..., -0.7839, -0.3291,  0.6718],
+         [-0.3501, -0.6737,  0.1889,  ...,  0.0036, -0.7591, -0.4517]]],
+       grad_fn=<UnsafeViewBackward0>)
+```
+最后可以按如下方式计算模型的大小：
+
+```python
+total_params = sum(p.numel() for p in model.parameters())
+print(f"参数总数： {total_params:,}")
+
+total_params_gpt2 =  total_params - sum(p.numel() for p in model.out_head.parameters())
+print(f"考虑到权重绑定的可训练参数数量： {total_params_gpt2:,}")
+
+# Calculate the total size in bytes (assuming float32, 4 bytes per parameter)
+total_size_bytes = total_params * 4
+
+# Convert to megabytes
+total_size_mb = total_size_bytes / (1024 * 1024)
+
+print(f"所需内存大小: {total_size_mb:.2f} MB")
+```
+```
+参数总数： 85,530,624
+考虑到权重绑定的可训练参数数量： 85,282,560
+所需内存大小: 326.27 MB
+```
+
+这是一个有着85M个参数的模型，下一节我们将训练这个模型。
 
 ## 3. 模型训练与评估
 
