@@ -1176,10 +1176,592 @@ print(decoded_text)
 
 ## 3. 模型训练与评估
 
-## 4. 文本生成与微调
+- 首先让我们把之前实现的代码归到一个模块中 `llm.py`，这样让下面的章节代码使用更简洁清晰一点
+- 然后将上一节最后测试时将文本转换为token ID 和 token ID转换为文本提炼为两个方法 `text_to_token_ids` 和 `token_ids_to_text`
+- 接着我们继续来看看前言中提出的问题，如何根据已有模型来预测下一个输出
+
+``` python
+from llm import SimpleTokenizer, create_vocab, GPTModel, generate_text_simple, text_to_token_ids, token_ids_to_text
+
+GPT_CONFIG_85M = {
+    "vocab_size": 323,      # 词汇表大小
+    "context_length": 8,    # 上下文长度
+    "emb_dim": 768,          # 嵌入维度
+    "n_heads": 12,          # 注意力头数量
+    "n_layers": 12,         # 层数
+    "drop_rate": 0.1,       # Dropout 率
+    "qkv_bias": False       # Query-Key-Value bias
+}
+
+with open("the-road.txt", "r", encoding="utf-8") as f:
+    raw_text = f.read()
+tokenizer = SimpleTokenizer(vocab=create_vocab(raw_text=raw_text))
+model = GPTModel(cfg=GPT_CONFIG_85M)
+
+start_text = "每一次努力都让你感动"
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(start_text, tokenizer),
+    max_new_tokens=10,
+    context_size=GPT_CONFIG_85M["context_length"]
+)
+
+print("输出文本:\n", token_ids_to_text(token_ids, tokenizer))
+```
+```python
+输出文本:
+ 每一次努力都让你感动然然人耘定够场挥挥辉
+```
+
+### 3.1 训练集和验证集
+
+如上所示，由于模型尚未经过训练，因此无法生成优质文本。如何以数字形式测量或捕捉“优质文本”，以便在训练期间进行跟踪？
+- 其实，对于数值数据，我们可以测量两个数字之间的距离来标记它们之间的差异
+- 然后，假设我们有一组数据集，包含 `inputs` 张量，和其移动一个位置的 `targets`，这部分在数据预处理中已实现
+- 接着，我们可以将这个 `inputs` 输入到模型中，然后模型会输出对应的 `logits` 张量，这部分在 `generate_text_simple` 中已有相关实现
+- 最后，将 `targets` 和 `logits` 通过计算距离并对比来测量模型输出与正确的预测（目标）有多远
+- 在深度学习中，使用最大化概率分数的对数来表示距离目标有多远，这种测量方式也成为交叉熵损失
+- PyTorch 已经实现了一个 `cross_entropy` 函数来执行前面的步骤
+
+接下来，我们先将数据集分为训练和验证，然后使用交叉熵损失来计算损失
+
+```python
+total_characters = len(raw_text)
+total_tokens = len(tokenizer.encode(raw_text))
+
+print("总字数:", total_characters)
+print("总标记数:", total_tokens)
+```
+```python
+总字数: 778
+总标记数: 768
+```
+
+- 首先根据比例将数据集切割为训练集和验证集合：
+
+```python
+import torch
+from llm import create_dataloader
+
+# 训练/验证比率
+train_ratio = 0.90
+split_idx = int(train_ratio * len(raw_text))
+train_data = raw_text[:split_idx]
+val_data = raw_text[split_idx:]
+
+torch.manual_seed(123)
+train_loader = create_dataloader(
+    train_data,
+    vocab=create_vocab(raw_text=raw_text),
+    batch_size=2,
+    max_length=GPT_CONFIG_85M["context_length"],
+    stride=GPT_CONFIG_85M["context_length"],
+    drop_last=True,
+    shuffle=True,
+    num_workers=0
+)
+
+val_loader = create_dataloader(
+    val_data,
+    vocab=create_vocab(raw_text=raw_text),
+    batch_size=2,
+    max_length=GPT_CONFIG_85M["context_length"],
+    stride=GPT_CONFIG_85M["context_length"],
+    drop_last=False,
+    shuffle=False,
+    num_workers=0
+)
+```
+
+```python
+# 健全性检查
+if total_tokens * (train_ratio) < GPT_CONFIG_85M["context_length"]:
+    print("训练加载器没有足够的令牌。尝试降低 `GPT_CONFIG_85M['context_length']` 或 增加 `training_ratio`")
+
+if total_tokens * (1-train_ratio) < GPT_CONFIG_85M["context_length"]:
+    print("验证加载器没有足够的令牌。尝试降低 `GPT_CONFIG_85M['context_length']` 或  降低 `training_ratio`")
+```
+
+- 可选检查数据是否已正确加载：
+
+```python
+print("训练集加载：")
+for x, y in train_loader:
+    print(x.shape, y.shape)
+
+print("\n验证集加载：")
+for x, y in val_loader:
+    print(x.shape, y.shape)
+```
+
+```python
+训练集加载：
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+...
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([2, 8]) torch.Size([2, 8])
+torch.Size([1, 8]) torch.Size([1, 8])
+```
+
+- 另一个可选检查是检查 `token` 数量是否在预期的范围内：
+
+```python
+train_tokens = 0
+for input_batch, target_batch in train_loader:
+    train_tokens += input_batch.numel()
+
+val_tokens = 0
+for input_batch, target_batch in val_loader:
+    val_tokens += input_batch.numel()
+
+print("训练集 tokens:", train_tokens)
+print("验证集 tokens:", val_tokens)
+print("所有 tokens:", train_tokens + val_tokens)
+```
+
+```python
+训练集 tokens: 688
+验证集 tokens: 72
+所有 tokens: 760
+```
+
+### 3.2 交叉熵损失
+
+- 我们实现一个方法来计算给定批次的交叉熵损失
+- 此外，我们实现第二个效用函数来计算数据加载器中用户指定批次数量的损失
+
+```python
+def calc_loss_batch(input_batch, target_batch, model, device):
+    input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+    logits = model(input_batch)
+    loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), target_batch.flatten())
+    return loss
 
 
+def calc_loss_loader(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        # 如果 num_batches 超过数据加载器中的批次数量，减少批次数量以匹配数据加载器中的批次总数
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
+```
 
+- 如果您的机器配有支持 CUDA 的 GPU，LLM 将在 GPU 上进行训练，而无需对代码进行任何更改
+- 通过 `device` 设置，我们确保数据加载到与 LLM 模型相同的设备上
+
+```python
+if torch.cuda.is_available():
+   device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+   device = torch.device("mps")
+else:
+   device = torch.device("cpu")
+
+print(f"使用 {device} 设备.")
+
+model.to(device) 
+
+torch.manual_seed(123) 
+
+with torch.no_grad():
+    train_loss = calc_loss_loader(train_loader, model, device)
+    val_loss = calc_loss_loader(val_loader, model, device)
+
+print("训练集损失:", train_loss)
+print("验证集损失:", val_loss)
+```
+
+```python
+使用 cpu 设备.
+训练集损失: 5.922613764918128
+验证集损失: 5.9078624725341795
+```
+
+### 3.3 训练大模型
+
+在本节我们实现一个简单的训练方法进行模型训练
+
+```python
+def train_model_simple(model, train_loader, val_loader, optimizer, device, num_epochs,
+                       eval_freq, eval_iter, start_context, tokenizer):
+    # 初始化列表以追踪损失和看到的输出
+    train_losses, val_losses, track_tokens_seen = [], [], []
+    tokens_seen, global_step = 0, -1
+
+    # 主训练循环
+    for epoch in range(num_epochs):
+        model.train()  # # 将模型设置为训练模式
+        
+        for input_batch, target_batch in train_loader:
+            optimizer.zero_grad() # 重置上一次批次迭代的损失梯度
+            loss = calc_loss_batch(input_batch, target_batch, model, device)
+            loss.backward() # 计算损失梯度
+            optimizer.step() # 使用损失梯度更新模型权重
+            tokens_seen += input_batch.numel()
+            global_step += 1
+
+            # 可选评估步骤
+            if global_step % eval_freq == 0:
+                train_loss, val_loss = evaluate_model(
+                    model, train_loader, val_loader, device, eval_iter)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                track_tokens_seen.append(tokens_seen)
+                print(f"Ep {epoch+1} (Step {global_step:06d}): "
+                      f"训练损失 {train_loss:.3f}, 验证损失 {val_loss:.3f}")
+
+        # 每个时期后打印一个示例文本
+        generate_and_print_sample(
+            model, tokenizer, device, start_context
+        )
+
+    return train_losses, val_losses, track_tokens_seen
+
+
+def evaluate_model(model, train_loader, val_loader, device, eval_iter):
+    model.eval()
+    with torch.no_grad():
+        train_loss = calc_loss_loader(train_loader, model, device, num_batches=eval_iter)
+        val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
+    model.train()
+    return train_loss, val_loss
+
+
+def generate_and_print_sample(model, tokenizer, device, start_context):
+    model.eval()
+    context_size = model.pos_emb.weight.shape[0]
+    encoded = text_to_token_ids(start_context, tokenizer).to(device)
+    with torch.no_grad():
+        token_ids = generate_text_simple(
+            model=model, idx=encoded,
+            max_new_tokens=50, context_size=context_size
+        )
+    decoded_text = token_ids_to_text(token_ids, tokenizer)
+    print(decoded_text.replace("\n", " "))  # Compact print format
+    model.train()
+```
+
+- 现在，让我们使用上面定义的训练函数来训练 LLM：
+
+```python
+import time
+start_time = time.time()
+
+torch.manual_seed(123)
+model = GPTModel(GPT_CONFIG_85M)
+model.to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
+
+num_epochs = 10
+train_losses, val_losses, tokens_seen = train_model_simple(
+    model, train_loader, val_loader, optimizer, device,
+    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+    start_context="每一次努力都让你感动", tokenizer=tokenizer
+)
+
+end_time = time.time()
+execution_time_minutes = (end_time - start_time) / 60
+print(f"训练在 {execution_time_minutes:.2f} 分钟内完成。")
+```
+
+```python
+Ep 1 (Step 000000): 训练损失 6.495, 验证损失 6.622
+Ep 1 (Step 000005): 训练损失 5.938, 验证损失 6.079
+Ep 1 (Step 000010): 训练损失 5.724, 验证损失 6.265
+Ep 1 (Step 000015): 训练损失 5.127, 验证损失 6.435
+Ep 1 (Step 000020): 训练损失 5.420, 验证损失 6.556
+Ep 1 (Step 000025): 训练损失 5.566, 验证损失 6.544
+Ep 1 (Step 000030): 训练损失 5.482, 验证损失 6.460
+Ep 1 (Step 000035): 训练损失 5.352, 验证损失 6.386
+Ep 1 (Step 000040): 训练损失 4.971, 验证损失 6.757
+每一次努力都让你感动的。我们的。我们的。。我们的。我们的。。我们的。我们的。。我们的。我们的。。我们的。我们的。。我们的
+Ep 2 (Step 000045): 训练损失 5.745, 验证损失 6.569
+Ep 2 (Step 000050): 训练损失 5.352, 验证损失 6.515
+Ep 2 (Step 000055): 训练损失 4.909, 验证损失 6.761
+Ep 2 (Step 000060): 训练损失 5.338, 验证损失 6.810
+Ep 2 (Step 000065): 训练损失 4.773, 验证损失 6.682
+Ep 2 (Step 000070): 训练损失 4.298, 验证损失 6.594
+Ep 2 (Step 000075): 训练损失 4.797, 验证损失 6.583
+Ep 2 (Step 000080): 训练损失 4.564, 验证损失 6.882
+Ep 2 (Step 000085): 训练损失 4.333, 验证损失 6.319
+每一次努力都让你感动中来的中中来的中来的中中来的中来的中中来的中来的中中来的中来的中中来的中来的中中来的中来的中中来的中
+Ep 3 (Step 000090): 训练损失 4.717, 验证损失 5.658
+Ep 3 (Step 000095): 训练损失 4.326, 验证损失 6.135
+Ep 3 (Step 000100): 训练损失 4.390, 验证损失 6.231
+Ep 3 (Step 000105): 训练损失 4.148, 验证损失 6.353
+Ep 3 (Step 000110): 训练损失 3.734, 验证损失 6.314
+...
+Ep 10 (Step 000420): 训练损失 0.163, 验证损失 6.890
+Ep 10 (Step 000425): 训练损失 0.149, 验证损失 6.898
+每一次努力都让你感动。当我们的努力。每一点小，我们也是学习毅加实验有了梦想的努力。每一点小，我们也是学习毅加实验有了梦想
+训练在 2.87 分钟内完成。
+```
+将上述的训练和验证损失绘制到图中查看结果：
+
+```python
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+
+    # Plot training and validation loss against epochs
+    ax1.plot(epochs_seen, train_losses, label="Training loss")
+    ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))  # only show integer labels on x-axis
+
+    # Create a second x-axis for tokens seen
+    ax2 = ax1.twiny()  # Create a second x-axis that shares the same y-axis
+    ax2.plot(tokens_seen, train_losses, alpha=0)  # Invisible plot for aligning ticks
+    ax2.set_xlabel("Tokens seen")
+
+    fig.tight_layout()  # Adjust layout to make room
+    plt.savefig("loss-plot.pdf")
+    plt.show()
+
+epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+```
+
+![alt text](image.png)
+
+- 查看上面的结果，我们可以看到模型一开始会生成难以理解的字符串，而到最后，它能够生成语法或多或少正确的句子
+- 但是，根据训练和验证集损失，我们可以看到模型开始过度拟合
+- 如果我们检查它在最后写的几段话，我们会发现它们逐字逐句地包含在训练集中——它只是记住了训练数据
+- 稍后，我们将介绍可以在一定程度上减轻这种记忆的解码策略
+- 请注意，这里发生过度拟合是因为我们有一个非常非常小的训练集，并且我们对其进行了多次迭代
+- 这里的 LLM 培训主要用于学习目的；我们主要想看看模型可以学会生成连贯的文本
+
+### 3.4 保存模型权重
+
+- 训练 LLM 的计算成本很高，因此能够保存和加载 LLM 权重至关重要
+- PyTorch 中推荐的方式是通过将 `torch.save` 函数应用于 `.state_dict()` 方法来保存模型权重，即所谓的 `state_dict`
+- 通常使用 Adam 或 AdamW 等自适应优化器来训练，这些自适应优化器会为每个模型权重存储额外的参数，因此如果我们计划稍后继续进行预训练，那么保存这些参数也是有意义的：
+
+```python
+torch.save({
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optimizer.state_dict(),
+    }, 
+    "model_and_optimizer.pth"
+)
+```
+
+加载的代码如下：
+
+```python
+checkpoint = torch.load("model_and_optimizer.pth", weights_only=True)
+
+model = GPTModel(GPT_CONFIG_85M)
+model.load_state_dict(checkpoint["model_state_dict"])
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=0.1)
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+model.train();
+```
+
+## 4. 文本生成
+
+- 首先将上一节关于模型训练的代码移动到 `llm.py`
+- 使用我们之前在简单训练函数中使用的 `generate_text_simple` 函数，可以一次生成一个标记的新文本
+- 下一个生成的标记是词汇表中所有标记中概率得分最大的标记
+
+```python
+from llm import SimpleTokenizer, create_vocab, GPTModel, generate_text_simple, text_to_token_ids, token_ids_to_text
+
+GPT_CONFIG_85M = {
+    "vocab_size": 323,      # 词汇表大小
+    "context_length": 8,    # 上下文长度
+    "emb_dim": 768,          # 嵌入维度
+    "n_heads": 12,          # 注意力头数量
+    "n_layers": 12,         # 层数
+    "drop_rate": 0.1,       # Dropout 率
+    "qkv_bias": False       # Query-Key-Value bias
+}
+
+
+with open("the-road.txt", "r", encoding="utf-8") as f:
+    raw_text = f.read()
+
+tokenizer = SimpleTokenizer(vocab=create_vocab(raw_text=raw_text))
+
+# 加载模型
+checkpoint = torch.load("model_and_optimizer.pth", weights_only=True)
+model = GPTModel(GPT_CONFIG_85M)
+model.load_state_dict(checkpoint["model_state_dict"])
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=0.1)
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+model.to("cpu")
+model.eval()
+
+start_text = "每一次努力都让你感动"
+token_ids = generate_text_simple(
+    model=model,
+    idx=text_to_token_ids(start_text, tokenizer),
+    max_new_tokens=25,
+    context_size=GPT_CONFIG_85M["context_length"]
+)
+
+print("输出文本:\n", token_ids_to_text(token_ids, tokenizer))
+```
+
+```python
+输出文本:
+ 每一次努力都让你感动。当我们的努力。每一点小，我们也是学习毅加实验有了
+```
+
+即使我们多次执行上面的生成文本函数，LLM 也始终会生成相同的输出。我们现在引入两个概念，即所谓的解码策略，来修改 `generate_text_simple`：*温度缩放* 和 *top-k* 采样，这些将允许模型控制生成文本的随机性和多样性。
+- 温度缩放：使用 `torch.multinomial(probs, num_samples=1)` 从概率分布中采样下一个标记
+- `Top-K` 采样：为了能够使用更高的温度来增加输出多样性并降低无意义句子的概率，我们可以将采样的标记限制为前 k 个最可能的标记：
+
+
+```python
+def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
+
+    # For 循环与之前相同：获取 logits，并且仅关注最后一个时间步
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:]
+        with torch.no_grad():
+            logits = model(idx_cond)
+        logits = logits[:, -1, :]
+
+        # 新功能：使用 top_k 采样过滤 logits
+        if top_k is not None:
+            # 仅保留top_k个值
+            top_logits, _ = torch.topk(logits, top_k)
+            min_val = top_logits[:, -1]
+            logits = torch.where(logits < min_val, torch.tensor(float("-inf")).to(logits.device), logits)
+
+        # 新功能：应用温度缩放
+        if temperature > 0.0:
+            logits = logits / temperature
+
+            # 应用 softmax 获取概率
+            probs = torch.softmax(logits, dim=-1)  # (batch_size, context_len)
+
+            # 从分布中抽样
+            idx_next = torch.multinomial(probs, num_samples=1)  # (batch_size, 1)
+
+        # 否则与之前相同：获取具有最高 logits 值的词汇条目的 idx
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch_size, 1)
+
+        if idx_next == eos_id:  # 如果遇到序列结束标记并且指定了 eos_id，则提前停止生成
+            break
+
+        # 与之前相同：将采样索引附加到运行序列
+        idx = torch.cat((idx, idx_next), dim=1)  # (batch_size, num_tokens+1)
+
+    return idx
+```
+
+```python
+torch.manual_seed(123)
+
+token_ids = generate(
+    model=model,
+    idx=text_to_token_ids("每一次努力都让你感动", tokenizer),
+    max_new_tokens=50,
+    context_size=GPT_CONFIG_85M["context_length"],
+    top_k=25,
+    temperature=1.4
+)
+
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+```
+
+```python
+Output text:
+ 每一次努力都让你感动。每一这个过我们也是学习间最家从中吸战付出努力。相此，以，以，用为边心怀感恩之最并学学习的财富终习。
+```
+
+## 结语
+
+最后，我们完成了一个简单版的大模型，包括文本数据预处理、模型架构实现、模型训练和文本生成等，最后我们使用完整的代码来演示一下文本生成：
+
+```python
+from llm import SimpleTokenizer, create_vocab, GPTModel, generate, text_to_token_ids, token_ids_to_text
+
+with open("the-road.txt", "r", encoding="utf-8") as f:
+    raw_text = f.read()
+
+GPT_CONFIG_85M = {
+    "vocab_size": 323,      # 词汇表大小
+    "context_length": 8,    # 上下文长度
+    "emb_dim": 768,          # 嵌入维度
+    "n_heads": 12,          # 注意力头数量
+    "n_layers": 12,         # 层数
+    "drop_rate": 0.1,       # Dropout 率
+    "qkv_bias": False       # Query-Key-Value bias
+}
+
+tokenizer = SimpleTokenizer(vocab=create_vocab(raw_text=raw_text))
+
+# 加载模型
+checkpoint = torch.load("model_and_optimizer.pth", weights_only=True)
+model = GPTModel(GPT_CONFIG_85M)
+model.load_state_dict(checkpoint["model_state_dict"])
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=0.1)
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+model.to("cpu")
+model.eval()
+
+start_text = "每一次努力都让你感动"
+token_ids = generate(
+    model=model,
+    idx=text_to_token_ids(start_text, tokenizer),
+    max_new_tokens=25,
+    context_size=GPT_CONFIG_85M["context_length"]
+)
+
+print("输出文本:\n", token_ids_to_text(token_ids, tokenizer))
+```
+```python
+输出文本:
+ 每一次努力都让你感动。当我们的努力。每一点小，我们也是学习毅加实验有了
+ ```
+
+从输出的结果来看，内容也不尽人意，当然这个是因为我们的训练集太小了，我们可以选择一些公共数据集进行训练，以取得更好的结果，生成优质的文本，但这也需要更多的资源和时间。
+
+另外，在最后我附上本文参考的内容：[Build a Large Language Model (From Scratch)](https://github.com/GavinHome/LLMs-from-scratch)
 
 
 ## License
