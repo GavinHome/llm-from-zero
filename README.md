@@ -1761,7 +1761,7 @@ print("输出文本:\n", token_ids_to_text(token_ids, tokenizer))
 
 从输出的结果来看，内容也不尽人意，当然这个是因为我们的训练集太小了，我们可以选择一些公共数据集进行训练，以取得更好的结果，生成优质的文本，但这也需要更多的资源和时间。
 
-另外，在最后我附上本文参考的内容：[Build a Large Language Model (From Scratch)](https://github.com/GavinHome/LLMs-from-scratch)
+另外，在最后我附上本文参考的内容：[Build a Large Language Model (From Scratch)](https://github.com/rasbt/LLMs-from-scratch)
 
 
 ## License
